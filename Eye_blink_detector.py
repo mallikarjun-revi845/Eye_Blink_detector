@@ -1,84 +1,147 @@
 import cv2
 import time
-import winsound  # For sound alert on Windows (use playsound for Mac/Linux)
+import argparse
+import logging
+import numpy as np
+from typing import Tuple
 
-# Load Haar cascades
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye_tree_eyeglasses.xml')
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Could not open webcam.")
-    exit()
+class BlinkDetector:
+    """
+    A professional-grade Eye Blink Detector using OpenCV Haar Cascades.
+    Provides robust OOP structure, FPS tracking, and blink counting without 
+    external dependencies that conflict with your environment.
+    """
 
-blink_count = 0
-eyes_closed = False
-last_blink_time = 0
-emoji = "😎"  # Default emoji
+    def __init__(self, consecutive_frames: int = 2):
+        """
+        Initializes the BlinkDetector.
 
-start_time = time.time()
+        Args:
+            consecutive_frames (int): Number of consecutive frames eyes must be missing to count as a blink.
+        """
+        self.consecutive_frames = consecutive_frames
+        
+        # Initialize Haar Cascades
+        try:
+            self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            self.eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye_tree_eyeglasses.xml')
+        except Exception as e:
+            logging.error(f"Error loading cascades: {e}")
+            raise
+        
+        # State variables
+        self.blink_counter = 0
+        self.eyes_closed_frames = 0
+        self.prev_time = 0.0
 
-while True:
-    ret, img = cap.read()
-    if not ret:
-        print("Error: Could not read frame.")
-        break
+    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Processes a single video frame to detect faces, eyes, and blinks.
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 5, 1, 1)
+        Args:
+            frame (np.ndarray): The BGR image frame from the camera.
 
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5, minSize=(100, 100))
-    eyes_detected = False
+        Returns:
+            np.ndarray: The annotated frame with blink status, counter, and FPS.
+        """
+        # FPS Calculation
+        current_time = time.time()
+        fps = 1 / (current_time - self.prev_time) if self.prev_time > 0 else 0
+        self.prev_time = current_time
 
-    for (x, y, w, h) in faces:
-        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 255), 2)
-        roi_face = gray[y:y + h, x:x + w]
-        eyes = eye_cascade.detectMultiScale(roi_face, 1.3, 5, minSize=(30, 30))
-        if len(eyes) >= 2:
-            eyes_detected = True
-            break
+        # Convert to Grayscale for Haar Cascades
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        status_text = "No Face Detected"
+        status_color = (0, 255, 255) # Yellow
 
-    # --- Blink Detection Logic ---
-    if eyes_detected:
-        cv2.putText(img, "Eyes Open 😃", (50, 50),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 2)
-        emoji = "😃"
-        if eyes_closed:
-            blink_count += 1
-            winsound.Beep(1000, 150)  # short beep
-            last_blink_time = time.time()
-            eyes_closed = False
-    else:
-        cv2.putText(img, "Eyes Closed 😴", (50, 50),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 0, 255), 2)
-        emoji = "😴"
-        eyes_closed = True
+        # Detect Faces
+        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5, minSize=(200, 200))
+        
+        if len(faces) > 0:
+            for (x, y, w, h) in faces:
+                # Draw face rectangle
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
 
-    # --- Fun Display ---
-    elapsed_time = time.time() - start_time
-    blink_rate = blink_count / (elapsed_time / 60) if elapsed_time > 10 else 0  # blinks per minute
+                # Extract the Region of Interest (ROI) for eyes
+                roi_gray = gray[y:y+h, x:x+w]
+                roi_color = frame[y:y+h, x:x+w]
+                
+                # Detect Eyes
+                eyes = self.eye_cascade.detectMultiScale(roi_gray, 1.3, 5, minSize=(50, 50))
 
-    cv2.putText(img, f"Total Blinks: {blink_count}", (50, 120),
-                cv2.FONT_HERSHEY_DUPLEX, 1.1, (255, 255, 0), 2)
+                # Blink Logic: Less than 2 eyes detected indicates closed eyes
+                if len(eyes) >= 2:
+                    status_text = "Eyes Open"
+                    status_color = (0, 255, 0) # Green
+                    
+                    # If eyes were closed for enough frames before opening, count a blink
+                    if self.eyes_closed_frames >= self.consecutive_frames:
+                        self.blink_counter += 1
+                        logging.info(f"Blink detected! Total blinks: {self.blink_counter}")
+                    
+                    self.eyes_closed_frames = 0
+                    
+                    # Draw rectangles around eyes
+                    for (ex, ey, ew, eh) in eyes:
+                        cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (0, 255, 255), 2)
+                else:
+                    status_text = "Blink Detected!"
+                    status_color = (0, 0, 255) # Red
+                    self.eyes_closed_frames += 1
 
-    cv2.putText(img, f"Blink Rate: {blink_rate:.1f} /min", (50, 170),
-                cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 200, 100), 2)
+        # Overlay Statistics on the frame
+        cv2.putText(frame, f"FPS: {int(fps)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(frame, f"Blinks: {self.blink_counter}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(frame, status_text, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
-    # Add emoji reaction
-    cv2.putText(img, emoji, (500, 100), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 3)
+        return frame
 
-    # Draw a progress-style bar for fun
-    bar_width = int((blink_count % 10) * 50)
-    cv2.rectangle(img, (50, 200), (50 + bar_width, 230), (0, 200, 255), -1)
-    cv2.putText(img, "Blink Energy Bar", (50, 260), cv2.FONT_HERSHEY_PLAIN, 1.2, (200, 255, 255), 2)
+    def run(self, camera_index: int = 0) -> None:
+        """
+        Starts the video capture and blink detection loop.
+        
+        Args:
+            camera_index (int): The index of the camera to use.
+        """
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            logging.error(f"Failed to open camera with index {camera_index}.")
+            return
 
-    cv2.imshow("👁️ Smart Blink Tracker 👁️", img)
+        logging.info("Starting Eye Blink Detector. Press 'q' to quit.")
 
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
-        break
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    logging.warning("Failed to grab frame from camera. Exiting...")
+                    break
+                
+                # Process the frame
+                annotated_frame = self.process_frame(frame)
+                
+                # Display the result
+                cv2.imshow("Professional Blink Detector (Haar Cascade)", annotated_frame)
+                
+                # Exit on 'q' key
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    logging.info("Exit requested by user.")
+                    break
+        finally:
+            # Cleanup resources
+            cap.release()
+            cv2.destroyAllWindows()
 
-cap.release()
-cv2.destroyAllWindows()
-
-print(f"✅ Session ended. Total blinks detected: {blink_count}")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the Professional Eye Blink Detector.")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
+    parser.add_argument("--frames", type=int, default=1, help="Consecutive frames for blink detection (default: 1)")
+    
+    args = parser.parse_args()
+    
+    detector = BlinkDetector(consecutive_frames=args.frames)
+    detector.run(camera_index=args.camera)
